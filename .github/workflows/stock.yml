@@ -1,26 +1,379 @@
-name: Taiwan Stock Monitor
+import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import time
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 1 * * 1-5"
 
-jobs:
-  monitor:
-    runs-on: ubuntu-latest
-    timeout-minutes: 270
+# =========================================================
+# 台股即時行情監控
+# =========================================================
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+STOCKS = {
+    "2330": "台積電",
+    "0050": "元大台灣50",
+    "00981A": "主動統一台股增長",
+    "00891": "中信關鍵半導體",
+    "2412": "中華電",
+}
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+API_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 
-      - name: Install requests
-        run: python -m pip install requests
+MAX_RETRY = 3
 
-      - name: Run stock monitor
-        run: python stock_monitor.py
+TIMEZONE = ZoneInfo("Asia/Taipei")
+
+
+# =========================================================
+# 台灣現在時間
+# =========================================================
+
+def taiwan_now():
+    return datetime.now(TIMEZONE)
+
+
+# =========================================================
+# 取得 TWSE 即時行情
+# =========================================================
+
+def get_market_data():
+
+    query = ["tse_t00.tw"]
+
+    for code in STOCKS:
+        query.append(f"tse_{code}.tw")
+
+    params = {
+        "ex_ch": "|".join(query),
+        "json": "1",
+        "delay": "0",
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://mis.twse.com.tw/",
+    }
+
+    for attempt in range(1, MAX_RETRY + 1):
+
+        try:
+
+            response = requests.get(
+                API_URL,
+                params=params,
+                headers=headers,
+                timeout=15,
+            )
+
+            response.raise_for_status()
+
+            result = response.json()
+
+            data = result.get("msgArray", [])
+
+            if data:
+                return data
+
+            print(
+                f"⚠️ 第 {attempt} 次沒有取得行情資料"
+            )
+
+        except Exception as e:
+
+            print(
+                f"⚠️ 第 {attempt} 次取得行情失敗：{e}"
+            )
+
+        if attempt < MAX_RETRY:
+            time.sleep(3)
+
+    return []
+
+
+# =========================================================
+# 尋找指定股票
+# =========================================================
+
+def find_stock(data, code):
+
+    for item in data:
+
+        if item.get("c") == code:
+            return item
+
+    return None
+
+
+# =========================================================
+# 取得最新價格
+# =========================================================
+
+def get_latest(item):
+
+    if not item:
+        return None
+
+    value = item.get("z")
+
+    if value in ("", "-", None):
+        return None
+
+    try:
+        return float(value)
+
+    except Exception:
+        return None
+
+
+# =========================================================
+# 取得昨收
+# =========================================================
+
+def get_previous(item):
+
+    if not item:
+        return None
+
+    value = item.get("y")
+
+    if value in ("", "-", None):
+        return None
+
+    try:
+        return float(value)
+
+    except Exception:
+        return None
+
+
+# =========================================================
+# 計算漲跌
+# =========================================================
+
+def calculate_change(item):
+
+    latest = get_latest(item)
+    previous = get_previous(item)
+
+    if latest is None or previous is None:
+        return None, None
+
+    change = latest - previous
+
+    if previous != 0:
+        percent = change / previous * 100
+    else:
+        percent = None
+
+    return change, percent
+
+
+# =========================================================
+# 顯示加權指數
+# =========================================================
+
+def show_index(data):
+
+    index = find_stock(data, "t00")
+
+    print()
+    print("📈【加權指數】")
+    print("-" * 60)
+
+    if not index:
+
+        print("⚠️ 目前沒有取得加權指數資料")
+        return
+
+    latest = get_latest(index)
+    previous = get_previous(index)
+
+    change, percent = calculate_change(index)
+
+    if latest is not None:
+        print(f"即時指數：{latest:.2f}")
+    else:
+        print("即時指數：-")
+
+    if change is not None:
+        print(f"漲跌：{change:+.2f}")
+    else:
+        print("漲跌：-")
+
+    if percent is not None:
+        print(f"漲跌幅：{percent:+.2f}%")
+    else:
+        print("漲跌幅：-")
+
+    print(
+        f"成交量：{index.get('v', '-')}"
+    )
+
+    print(
+        f"行情時間：{index.get('t', '-')}"
+    )
+
+
+# =========================================================
+# 顯示個股
+# =========================================================
+
+def show_stock(data, code, name):
+
+    item = find_stock(data, code)
+
+    print()
+    print(f"💰【{code}｜{name}】")
+    print("-" * 60)
+
+    if not item:
+
+        print("⚠️ 目前沒有取得資料")
+        return
+
+    latest = get_latest(item)
+    previous = get_previous(item)
+
+    change, percent = calculate_change(item)
+
+    if latest is not None:
+        print(f"即時價格：{latest:.2f}")
+    else:
+        print("即時價格：-")
+
+    if previous is not None:
+        print(f"昨收：{previous:.2f}")
+    else:
+        print("昨收：-")
+
+    if change is not None:
+        print(f"漲跌：{change:+.2f}")
+    else:
+        print("漲跌：-")
+
+    if percent is not None:
+        print(f"漲跌幅：{percent:+.2f}%")
+    else:
+        print("漲跌幅：-")
+
+    print(
+        f"成交量：{item.get('v', '-')}"
+    )
+
+    print(
+        f"行情時間：{item.get('t', '-')}"
+    )
+
+
+# =========================================================
+# 顯示完整行情
+# =========================================================
+
+def show_market(data):
+
+    now = taiwan_now()
+
+    print()
+    print("=" * 60)
+    print("🇹🇼 TAIWAN STOCK MONITOR")
+    print("=" * 60)
+
+    print(
+        f"日期：{now.strftime('%Y-%m-%d')}"
+    )
+
+    print(
+        f"更新時間：{now.strftime('%H:%M:%S')}"
+    )
+
+    print(
+        "時區：Asia/Taipei"
+    )
+
+    print("=" * 60)
+
+    # 加權指數
+    show_index(data)
+
+    # 個股 / ETF
+    print()
+    print("=" * 60)
+    print("📊 即時股票 / ETF")
+    print("=" * 60)
+
+    for code, name in STOCKS.items():
+
+        show_stock(
+            data,
+            code,
+            name
+        )
+
+    print()
+    print("=" * 60)
+    print("✅ 本次行情取得完成")
+    print("=" * 60)
+
+
+# =========================================================
+# 主程式
+# =========================================================
+
+def main():
+
+    start_time = taiwan_now()
+
+    print()
+    print("=" * 60)
+    print("🚀 台股即時行情監控啟動")
+    print("=" * 60)
+
+    print(
+        f"執行時間：{start_time.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    print()
+    print("監控項目：")
+
+    print("📈 加權指數")
+
+    for code, name in STOCKS.items():
+        print(
+            f"💰 {code}｜{name}"
+        )
+
+    print()
+    print("=" * 60)
+
+    # 取得資料
+    data = get_market_data()
+
+    if not data:
+
+        print()
+        print("❌ 本次行情取得失敗")
+        print("❌ TWSE API 沒有回傳有效資料")
+        print()
+
+        return
+
+    # 顯示行情
+    show_market(data)
+
+    # 完成
+    end_time = taiwan_now()
+
+    print()
+    print(
+        f"完成時間：{end_time.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    print("🏁 程式執行結束")
+    print()
+
+
+# =========================================================
+# Entry Point
+# =========================================================
+
+if __name__ == "__main__":
+    main()
